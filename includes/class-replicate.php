@@ -7,6 +7,8 @@ if (!defined('ABSPATH')) {
 }
 
 class Replicate {
+    const SDXL_VERSION = '7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc';
+
     public static function create($attachment_id) {
         $token = Settings::token();
         if ($token === '') {
@@ -47,36 +49,62 @@ class Replicate {
         $height = max(64, (int) (round($height / 8) * 8));
 
         $input = self::input($encoded, $width, $height, $attachment_id);
-        $model = Settings::model();
+        return self::request_prediction(Settings::model(), $input, $token);
+    }
+
+    private static function request_prediction($model, $input, $token) {
+        $last = null;
+        foreach (self::prediction_attempts($model, $input) as $attempt) {
+            $response = wp_remote_post($attempt['url'], [
+                'headers' => self::headers($token),
+                'body' => wp_json_encode($attempt['body']),
+                'timeout' => 60,
+            ]);
+            if (is_wp_error($response)) {
+                return $response;
+            }
+            $code = (int) wp_remote_retrieve_response_code($response);
+            $decoded = json_decode(wp_remote_retrieve_body($response), true);
+            if ($code >= 200 && $code < 300 && is_array($decoded) && !empty($decoded['urls']['get'])) {
+                return $decoded;
+            }
+            $last = new \WP_Error('cdair_replicate', self::error_message($decoded, $code));
+            if ($code !== 404) {
+                return $last;
+            }
+        }
+        return $last instanceof \WP_Error ? $last : new \WP_Error('cdair_replicate', __('Replicate did not start a prediction.', 'cubedigital-image-replacer'));
+    }
+
+    private static function prediction_attempts($model, $input) {
+        $attempts = [];
         if (preg_match('/^[a-f0-9]{64}$/', $model)) {
-            $url = 'https://api.replicate.com/v1/predictions';
-            $body = [
-                'version' => $model,
-                'input' => $input,
+            $attempts[] = [
+                'url' => 'https://api.replicate.com/v1/predictions',
+                'body' => [
+                    'version' => $model,
+                    'input' => $input,
+                ],
             ];
-        } else {
-            $parts = explode('/', $model);
-            $url = 'https://api.replicate.com/v1/models/' . rawurlencode($parts[0]) . '/' . rawurlencode($parts[1]) . '/predictions';
-            $body = ['input' => $input];
+            return $attempts;
         }
-
-        $response = wp_remote_post($url, [
-            'headers' => self::headers($token),
-            'body' => wp_json_encode($body),
-            'timeout' => 60,
-        ]);
-
-        if (is_wp_error($response)) {
-            return $response;
+        $parts = explode('/', $model);
+        if (count($parts) === 2) {
+            $attempts[] = [
+                'url' => 'https://api.replicate.com/v1/models/' . rawurlencode($parts[0]) . '/' . rawurlencode($parts[1]) . '/predictions',
+                'body' => ['input' => $input],
+            ];
         }
-
-        $code = (int) wp_remote_retrieve_response_code($response);
-        $decoded = json_decode(wp_remote_retrieve_body($response), true);
-        if ($code < 200 || $code >= 300 || !is_array($decoded) || empty($decoded['urls']['get'])) {
-            return new \WP_Error('cdair_replicate', self::error_message($decoded, $code));
+        if (self::is_sdxl($model)) {
+            $attempts[] = [
+                'url' => 'https://api.replicate.com/v1/predictions',
+                'body' => [
+                    'version' => self::SDXL_VERSION,
+                    'input' => $input,
+                ],
+            ];
         }
-
-        return $decoded;
+        return $attempts;
     }
 
     public static function fetch($get_url) {
@@ -192,6 +220,7 @@ class Replicate {
 
     private static function is_sdxl($model) {
         return $model === 'stability-ai/sdxl'
+            || $model === self::SDXL_VERSION
             || $model === '39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b';
     }
 
@@ -226,8 +255,11 @@ class Replicate {
         if ($message === '') {
             $message = sprintf(__('Replicate returned HTTP %d.', 'cubedigital-image-replacer'), (int) $code);
         }
-        $message = preg_replace('/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+\/=]+/', '[image]', $message);
-        return is_string($message) ? $message : __('Replicate returned an error.', 'cubedigital-image-replacer');
+        $message = preg_replace('/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+\/=]+/', '[image]', (string) $message);
+        if (!is_string($message) || $message === '') {
+            $message = __('Replicate returned an error.', 'cubedigital-image-replacer');
+        }
+        return $message . ' (HTTP ' . (int) $code . ')';
     }
 
     private static function allowed_output_url($url) {

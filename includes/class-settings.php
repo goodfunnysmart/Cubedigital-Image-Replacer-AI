@@ -62,6 +62,7 @@ class Settings {
         }
         echo '<div class="wrap">';
         echo '<h1>' . esc_html(get_admin_page_title()) . '</h1>';
+        echo '<p>' . esc_html(sprintf(__('Plugin version %s', 'cubedigital-image-replacer'), CDAIR_VERSION)) . '</p>';
         echo '<form action="options.php" method="post">';
         settings_fields(self::OPTION);
         do_settings_sections('cdair-settings');

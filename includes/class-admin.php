@@ -17,6 +17,8 @@ class Admin {
         add_action('wp_ajax_cdair_poll', [self::class, 'poll']);
         add_action('wp_ajax_cdair_restore', [self::class, 'restore']);
         add_action('wp_ajax_cdair_test', [self::class, 'test']);
+        add_action('wp_ajax_cdair_replace', [self::class, 'post_replace']);
+        add_action('wp_ajax_cdair_restore', [self::class, 'post_restore']);
         add_action('admin_post_cdair_replace', [self::class, 'post_replace']);
         add_action('admin_post_cdair_restore', [self::class, 'post_restore']);
         add_action('admin_notices', [self::class, 'notice']);
@@ -332,7 +334,7 @@ class Admin {
                     'action' => $action,
                     'attachment_id' => (int) $attachment_id,
                 ],
-                admin_url('admin-post.php')
+                admin_url('admin-ajax.php')
             ),
             $action . '_' . (int) $attachment_id
         );
@@ -354,7 +356,7 @@ class Admin {
             'message' => $error ? $result->get_error_message() : (string) $result,
         ], MINUTE_IN_SECONDS);
         $back = wp_get_referer();
-        if (!$back || strpos($back, 'admin-post.php') !== false) {
+        if (!$back || strpos($back, 'admin-post.php') !== false || strpos($back, 'admin-ajax.php') !== false) {
             $back = admin_url('upload.php');
         }
         wp_safe_redirect($back);
