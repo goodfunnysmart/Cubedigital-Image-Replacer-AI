@@ -17,6 +17,7 @@ class Admin {
         add_action('wp_ajax_cdair_poll', [self::class, 'poll']);
         add_action('wp_ajax_cdair_restore', [self::class, 'restore']);
         add_action('wp_ajax_cdair_test', [self::class, 'test']);
+        add_action('wp_ajax_cdair_test_page', [self::class, 'test_page']);
         add_action('wp_ajax_cdair_replace', [self::class, 'post_replace']);
         add_action('wp_ajax_cdair_restore', [self::class, 'post_restore']);
         add_action('admin_post_cdair_replace', [self::class, 'post_replace']);
@@ -201,6 +202,21 @@ class Admin {
             wp_send_json_error(['message' => $restored->get_error_message()]);
         }
         wp_send_json_success(['message' => __('Original image restored and thumbnails regenerated.', 'cubedigital-image-replacer')]);
+    }
+
+    public static function test_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot test the API token.', 'cubedigital-image-replacer'));
+        }
+        check_admin_referer('cdair_test_page');
+        $result = Replicate::test();
+        $error = is_wp_error($result);
+        set_transient('cdair_notice_' . get_current_user_id(), [
+            'error' => $error,
+            'message' => $error ? $result->get_error_message() : (string) $result,
+        ], MINUTE_IN_SECONDS);
+        wp_safe_redirect(admin_url('options-general.php?page=cdair-settings'));
+        exit;
     }
 
     public static function test() {

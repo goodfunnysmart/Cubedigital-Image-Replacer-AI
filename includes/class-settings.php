@@ -68,7 +68,8 @@ class Settings {
         do_settings_sections('cdair-settings');
         submit_button();
         echo '</form>';
-        echo '<p><button type="button" class="button" id="cdair-test">' . esc_html__('Test connection', 'cubedigital-image-replacer') . '</button> <span id="cdair-test-result"></span></p>';
+        $test_url = wp_nonce_url(admin_url('admin-ajax.php?action=cdair_test_page'), 'cdair_test_page');
+        echo '<p><a class="button" href="' . esc_url($test_url) . '">' . esc_html__('Test connection', 'cubedigital-image-replacer') . '</a></p>';
         echo '</div>';
     }
 
