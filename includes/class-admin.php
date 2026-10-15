@@ -17,6 +17,9 @@ class Admin {
         add_action('wp_ajax_cdair_poll', [self::class, 'poll']);
         add_action('wp_ajax_cdair_restore', [self::class, 'restore']);
         add_action('wp_ajax_cdair_test', [self::class, 'test']);
+        add_action('admin_post_cdair_replace', [self::class, 'post_replace']);
+        add_action('admin_post_cdair_restore', [self::class, 'post_restore']);
+        add_action('admin_notices', [self::class, 'notice']);
         add_filter('wp_get_attachment_image_src', [self::class, 'bust_admin_cache'], 10, 2);
     }
 
@@ -30,7 +33,7 @@ class Admin {
         if (!current_user_can('upload_files') && !current_user_can('manage_options')) {
             return;
         }
-        wp_enqueue_script('cdair-admin', plugins_url('assets/admin.js', CDAIR_FILE), [], CDAIR_VERSION, true);
+        wp_enqueue_script('cdair-admin', plugins_url('assets/admin.js', CDAIR_FILE), [], CDAIR_VERSION, false);
         wp_localize_script('cdair-admin', 'cdair', [
             'ajaxUrl' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('cdair_media'),
@@ -51,9 +54,9 @@ class Admin {
         if (!self::can_edit($post->ID) || !Replacer::is_supported($post->ID)) {
             return $actions;
         }
-        $actions['cdair_replace'] = self::link($post->ID, 'cdair_start', __('AI variation', 'cubedigital-image-replacer'));
+        $actions['cdair_replace'] = self::control($post->ID, 'cdair_replace', 'cdair_start', __('AI replace', 'cubedigital-image-replacer'), false);
         if (get_post_meta($post->ID, '_cdair_has_original', true)) {
-            $actions['cdair_restore'] = self::link($post->ID, 'cdair_restore', __('Restore original', 'cubedigital-image-replacer'));
+            $actions['cdair_restore'] = self::control($post->ID, 'cdair_restore', 'cdair_restore', __('Restore original', 'cubedigital-image-replacer'), false);
         }
         return $actions;
     }
@@ -221,29 +224,141 @@ class Admin {
         return $image;
     }
 
+    public static function post_replace() {
+        $id = self::post_attachment_id('cdair_replace');
+        self::redirect_with_notice(self::run_replace($id));
+    }
+
+    public static function post_restore() {
+        $id = self::post_attachment_id('cdair_restore');
+        if (function_exists('set_time_limit')) {
+            set_time_limit(180);
+        }
+        $restored = Replacer::restore($id);
+        if (is_wp_error($restored)) {
+            self::redirect_with_notice($restored);
+        }
+        self::redirect_with_notice(__('Original image restored and thumbnails regenerated.', 'cubedigital-image-replacer'));
+    }
+
+    public static function notice() {
+        $key = 'cdair_notice_' . get_current_user_id();
+        $notice = get_transient($key);
+        if (!is_array($notice) || empty($notice['message'])) {
+            return;
+        }
+        delete_transient($key);
+        $class = !empty($notice['error']) ? 'notice notice-error' : 'notice notice-success';
+        echo '<div class="' . esc_attr($class) . ' is-dismissible"><p>' . esc_html($notice['message']) . '</p></div>';
+    }
+
+    public static function run_replace($attachment_id) {
+        if (get_transient('cdair_lock_' . $attachment_id)) {
+            return new \WP_Error('cdair_busy', __('A variation is already running for this image.', 'cubedigital-image-replacer'));
+        }
+        set_transient('cdair_lock_' . $attachment_id, 1, 3 * MINUTE_IN_SECONDS);
+
+        $ready = Replacer::preflight($attachment_id);
+        if (is_wp_error($ready)) {
+            delete_transient('cdair_lock_' . $attachment_id);
+            return $ready;
+        }
+        if (function_exists('set_time_limit')) {
+            set_time_limit(180);
+        }
+
+        $prediction = Replicate::create($attachment_id);
+        if (is_wp_error($prediction) || empty($prediction['urls']['get'])) {
+            delete_transient('cdair_lock_' . $attachment_id);
+            return is_wp_error($prediction) ? $prediction : new \WP_Error('cdair_replicate', __('Replicate did not start a prediction.', 'cubedigital-image-replacer'));
+        }
+
+        $get = $prediction['urls']['get'];
+        $status = isset($prediction['status']) ? (string) $prediction['status'] : 'starting';
+        $deadline = time() + 150;
+        while (($status === 'starting' || $status === 'processing') && time() < $deadline) {
+            sleep(2);
+            $prediction = Replicate::fetch($get);
+            if (is_wp_error($prediction)) {
+                delete_transient('cdair_lock_' . $attachment_id);
+                return $prediction;
+            }
+            $status = isset($prediction['status']) ? (string) $prediction['status'] : '';
+        }
+
+        if ($status !== 'succeeded') {
+            delete_transient('cdair_lock_' . $attachment_id);
+            $error = !empty($prediction['error']) ? (string) $prediction['error'] : __('Replicate did not return an image, so nothing was changed.', 'cubedigital-image-replacer');
+            return new \WP_Error('cdair_replicate', $error);
+        }
+
+        $binary = Replicate::download(Replicate::output_url($prediction));
+        if (is_wp_error($binary)) {
+            delete_transient('cdair_lock_' . $attachment_id);
+            return $binary;
+        }
+
+        $saved = Replacer::commit($attachment_id, $binary, Settings::saturation());
+        delete_transient('cdair_lock_' . $attachment_id);
+        if (is_wp_error($saved)) {
+            return $saved;
+        }
+        return self::success_message(!empty($saved['regenerated']));
+    }
+
     private static function buttons($attachment_id) {
-        $html = sprintf(
-            '<button type="button" class="button cdair-action" data-cdair-action="cdair_start" data-id="%1$d">%2$s</button>',
-            (int) $attachment_id,
-            esc_html__('Replace with AI variation', 'cubedigital-image-replacer')
-        );
+        $html = self::control($attachment_id, 'cdair_replace', 'cdair_start', __('Replace with AI variation', 'cubedigital-image-replacer'), true);
         if (get_post_meta($attachment_id, '_cdair_has_original', true)) {
-            $html .= '<br><br>' . sprintf(
-                '<button type="button" class="button cdair-action" data-cdair-action="cdair_restore" data-id="%1$d">%2$s</button>',
-                (int) $attachment_id,
-                esc_html__('Restore original', 'cubedigital-image-replacer')
-            );
+            $html .= '<br><br>' . self::control($attachment_id, 'cdair_restore', 'cdair_restore', __('Restore original', 'cubedigital-image-replacer'), true);
         }
         return $html;
     }
 
-    private static function link($attachment_id, $action, $label) {
+    private static function control($attachment_id, $post_action, $ajax_action, $label, $button) {
         return sprintf(
-            '<a href="#" class="cdair-action" data-cdair-action="%1$s" data-id="%2$d">%3$s</a>',
-            esc_attr($action),
+            '<a href="%1$s" class="%2$s" data-cdair-action="%3$s" data-id="%4$d">%5$s</a>',
+            esc_url(self::action_url($attachment_id, $post_action)),
+            $button ? 'button cdair-action' : 'cdair-action',
+            esc_attr($ajax_action),
             (int) $attachment_id,
             esc_html($label)
         );
+    }
+
+    private static function action_url($attachment_id, $action) {
+        return wp_nonce_url(
+            add_query_arg(
+                [
+                    'action' => $action,
+                    'attachment_id' => (int) $attachment_id,
+                ],
+                admin_url('admin-post.php')
+            ),
+            $action . '_' . (int) $attachment_id
+        );
+    }
+
+    private static function post_attachment_id($action) {
+        $id = isset($_REQUEST['attachment_id']) ? absint($_REQUEST['attachment_id']) : 0;
+        if (!$id || !self::can_edit($id)) {
+            wp_die(esc_html__('You cannot edit this image.', 'cubedigital-image-replacer'));
+        }
+        check_admin_referer($action . '_' . $id);
+        return $id;
+    }
+
+    private static function redirect_with_notice($result) {
+        $error = is_wp_error($result);
+        set_transient('cdair_notice_' . get_current_user_id(), [
+            'error' => $error,
+            'message' => $error ? $result->get_error_message() : (string) $result,
+        ], MINUTE_IN_SECONDS);
+        $back = wp_get_referer();
+        if (!$back || strpos($back, 'admin-post.php') !== false) {
+            $back = admin_url('upload.php');
+        }
+        wp_safe_redirect($back);
+        exit;
     }
 
     private static function authorize() {
