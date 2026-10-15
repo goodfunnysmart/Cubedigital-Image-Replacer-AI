@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CubeDigital Image Replacer
  * Description: Replace a Media Library image with a subtle Replicate variation, keep the same URL, and restore the original later.
- * Version: 1.0.2
+ * Version: 1.0.3
  * Requires at least: 6.2
  * Requires PHP: 7.4
  * Author: CubeDigital
@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('CDAIR_VERSION', '1.0.2');
+define('CDAIR_VERSION', '1.0.3');
 define('CDAIR_FILE', __FILE__);
 define('CDAIR_DIR', plugin_dir_path(__FILE__));
 

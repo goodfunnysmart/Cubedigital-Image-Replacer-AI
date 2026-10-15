@@ -55,16 +55,21 @@ class Replicate {
     private static function request_prediction($model, $input, $token) {
         $last = null;
         foreach (self::prediction_attempts($model, $input) as $attempt) {
-            $response = wp_remote_post($attempt['url'], [
-                'headers' => self::headers($token),
-                'body' => wp_json_encode($attempt['body']),
-                'timeout' => 60,
-            ]);
+            $response = self::post_prediction($attempt, $token);
             if (is_wp_error($response)) {
                 return $response;
             }
             $code = (int) wp_remote_retrieve_response_code($response);
             $decoded = json_decode(wp_remote_retrieve_body($response), true);
+            if ($code === 429) {
+                sleep(self::retry_after($response, $decoded));
+                $response = self::post_prediction($attempt, $token);
+                if (is_wp_error($response)) {
+                    return $response;
+                }
+                $code = (int) wp_remote_retrieve_response_code($response);
+                $decoded = json_decode(wp_remote_retrieve_body($response), true);
+            }
             if ($code >= 200 && $code < 300 && is_array($decoded) && !empty($decoded['urls']['get'])) {
                 return $decoded;
             }
@@ -89,12 +94,6 @@ class Replicate {
             return $attempts;
         }
         $parts = explode('/', $model);
-        if (count($parts) === 2) {
-            $attempts[] = [
-                'url' => 'https://api.replicate.com/v1/models/' . rawurlencode($parts[0]) . '/' . rawurlencode($parts[1]) . '/predictions',
-                'body' => ['input' => $input],
-            ];
-        }
         if (self::is_sdxl($model)) {
             $attempts[] = [
                 'url' => 'https://api.replicate.com/v1/predictions',
@@ -102,6 +101,13 @@ class Replicate {
                     'version' => self::SDXL_VERSION,
                     'input' => $input,
                 ],
+            ];
+            return $attempts;
+        }
+        if (count($parts) === 2) {
+            $attempts[] = [
+                'url' => 'https://api.replicate.com/v1/models/' . rawurlencode($parts[0]) . '/' . rawurlencode($parts[1]) . '/predictions',
+                'body' => ['input' => $input],
             ];
         }
         return $attempts;
@@ -231,6 +237,26 @@ class Replicate {
         $w = (int) (round(($width * $scale) / 8) * 8);
         $h = (int) (round(($height * $scale) / 8) * 8);
         return [max(64, min(1024, $w)), max(64, min(1024, $h))];
+    }
+
+    private static function post_prediction($attempt, $token) {
+        return wp_remote_post($attempt['url'], [
+            'headers' => self::headers($token),
+            'body' => wp_json_encode($attempt['body']),
+            'timeout' => 60,
+        ]);
+    }
+
+    private static function retry_after($response, $body) {
+        $header = (int) wp_remote_retrieve_header($response, 'retry-after');
+        if ($header > 0) {
+            return min(20, $header);
+        }
+        $detail = is_array($body) && !empty($body['detail']) ? (string) $body['detail'] : '';
+        if (preg_match('/(\d+)\s*s/', $detail, $matches)) {
+            return min(20, max(1, (int) $matches[1] + 1));
+        }
+        return 9;
     }
 
     private static function headers($token) {
